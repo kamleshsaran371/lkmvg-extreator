@@ -27,14 +27,19 @@ apiurl = "https://api.classplusapp.com"
 s = cloudscraper.create_scraper() 
 
 
-def build_direct_media_url(org_id, content_id, encrypted_hash):
-    """Build direct Classplus media URL using orgId, contentId and encrypted hash."""
+def build_direct_media_url(org_id, content_id, encrypted_hash, source_url=""):
+    """Build Classplus media URL in {orgId}/cc/{contentId}-{suffix}/master.m3u8?hash_id=... format."""
     if not (org_id and content_id and encrypted_hash):
         return ""
-    return (
-        f"https://media-cdn.classplusapp.com/{str(org_id)}/cc/{str(content_id)}/master.m3u8"
-        f"?hash_id={str(encrypted_hash)}"
-    )
+
+    path_part = str(content_id)
+
+    if source_url:
+        match = re.search(r"/cc/([^/]+)/master\.m3u8", source_url)
+        if match and match.group(1).startswith(f"{content_id}-"):
+            path_part = match.group(1)
+
+    return f"https://media-cdn.classplusapp.com/{org_id}/cc/{path_part}/master.m3u8?hash_id={encrypted_hash}"
 
 @app.on_message(filters.command(["cp"]))
 async def classplus_txt(app, message):
@@ -438,7 +443,7 @@ async def extract_batch(app, message, org_name, batch_id):
                                 content_hash = video.get("contentHashId", "")
                         
                                 if video_url or content_hash:
-                                    direct_link = build_direct_media_url(org_id, content_id, content_hash)
+                                    direct_link = build_direct_media_url(org_id, content_id, content_hash, video_url)
                                     output_link = direct_link or encode_partial_url(video_url)
                                     outputs.append(f"🎬 {name}: {output_link}\n")
                 except Exception as e:
@@ -497,7 +502,7 @@ async def extract_batch(app, message, org_name, batch_id):
                         
                         # Use encrypted contentId endpoint for videos, keep source URL for non-videos
                         if icon == "🎬":
-                            output_link = build_direct_media_url(org_id, sub_id, content_hash) or encode_partial_url(video_url)
+                            output_link = build_direct_media_url(org_id, sub_id, content_hash, video_url) or encode_partial_url(video_url)
                         else:
                             output_link = encode_partial_url(video_url)
 
