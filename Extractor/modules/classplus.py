@@ -12,7 +12,7 @@ from Extractor import app
 import cloudscraper
 import concurrent.futures
 import re
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 from config import PREMIUM_LOGS, join,BOT_TEXT
 from datetime import datetime
 import pytz
@@ -35,6 +35,12 @@ def _first_non_empty(*values):
     return ""
 
 
+def _decode_hash_id(value):
+    if not isinstance(value, str):
+        return ""
+    return unquote(value.strip())
+
+
 def _extract_hash_id_from_url(url):
     if not url:
         return ""
@@ -42,7 +48,7 @@ def _extract_hash_id_from_url(url):
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
         hash_values = params.get("hash_id", [])
-        return hash_values[0] if hash_values else ""
+        return _decode_hash_id(hash_values[0]) if hash_values else ""
     except Exception:
         return ""
 
@@ -53,12 +59,29 @@ def _normalize_m3u8_url(url, fallback_hash=""):
         return ""
 
     parsed = urlparse(url)
-    current_params = parse_qs(parsed.query)
+    query_parts = []
+    has_hash_id = False
 
-    if fallback_hash and "hash_id" not in current_params:
-        current_params["hash_id"] = [fallback_hash]
+    if parsed.query:
+        for pair in parsed.query.split("&"):
+            if not pair:
+                continue
 
-    new_query = urlencode(current_params, doseq=True)
+            if "=" in pair:
+                key, value = pair.split("=", 1)
+            else:
+                key, value = pair, ""
+
+            if key == "hash_id":
+                has_hash_id = True
+                value = _decode_hash_id(value)
+
+            query_parts.append(f"{key}={value}" if "=" in pair else key)
+
+    if fallback_hash and not has_hash_id:
+        query_parts.append(f"hash_id={_decode_hash_id(fallback_hash)}")
+
+    new_query = "&".join(query_parts)
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
@@ -96,8 +119,8 @@ def build_direct_media_url(org_id, content_id, encrypted_hash, source_url="", ap
     3) Deterministic fallback URL built from org/content/hash values
     """
     source_hash = _extract_hash_id_from_url(source_url)
-    hash_value = _first_non_empty(source_hash, encrypted_hash)
-
+    hash_value = _decode_hash_id(_first_non_empty(source_hash, encrypted_hash))
+    
     signed_from_payload = _find_signed_m3u8_url(api_payload, fallback_hash=hash_value) if api_payload else ""
     if signed_from_payload:
         return signed_from_payload
@@ -115,7 +138,7 @@ def build_direct_media_url(org_id, content_id, encrypted_hash, source_url="", ap
         if match and match.group(1).startswith(f"{content_id}-"):
             path_part = match.group(1)
             
-    return f"https://media-cdn.classplusapp.com/{org_id}/cc/{path_part}/master.m3u8?hash_id={hash_value}"
+    return f"https://media-cdn.classplusapp.com/{org_id}/cc/{path_part}/master.m3u8?hash_id={_decode_hash_id(hash_value)}"
 
 @app.on_message(filters.command(["cp"]))
 async def classplus_txt(app, message):
