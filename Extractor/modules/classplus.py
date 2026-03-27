@@ -12,6 +12,7 @@ from Extractor import app
 import cloudscraper
 import concurrent.futures
 import re
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from config import PREMIUM_LOGS, join,BOT_TEXT
 from datetime import datetime
 import pytz
@@ -27,19 +28,94 @@ apiurl = "https://api.classplusapp.com"
 s = cloudscraper.create_scraper() 
 
 
-def build_direct_media_url(org_id, content_id, encrypted_hash, source_url=""):
-    """Build Classplus media URL in {orgId}/cc/{contentId}-{suffix}/master.m3u8?hash_id=... format."""
-    if not (org_id and content_id and encrypted_hash):
+def _first_non_empty(*values):
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _extract_hash_id_from_url(url):
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        hash_values = params.get("hash_id", [])
+        return hash_values[0] if hash_values else ""
+    except Exception:
+        return ""
+
+
+def _normalize_m3u8_url(url, fallback_hash=""):
+    """Return complete playable URL while preserving all existing query parameters."""
+    if not isinstance(url, str) or ".m3u8" not in url:
+        return ""
+
+    parsed = urlparse(url)
+    current_params = parse_qs(parsed.query)
+
+    if fallback_hash and "hash_id" not in current_params:
+        current_params["hash_id"] = [fallback_hash]
+
+    new_query = urlencode(current_params, doseq=True)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+
+def _find_signed_m3u8_url(payload, fallback_hash=""):
+    """
+    Recursively search API JSON for an m3u8 URL and preserve query string (hash_id, token, etc).
+    This avoids hardcoding response keys and remains compatible with API changes.
+    """
+    if isinstance(payload, dict):
+        for _, value in payload.items():
+            found = _find_signed_m3u8_url(value, fallback_hash=fallback_hash)
+            if found:
+                return found
+        return ""
+
+    if isinstance(payload, list):
+        for value in payload:
+            found = _find_signed_m3u8_url(value, fallback_hash=fallback_hash)
+            if found:
+                return found
+        return ""
+
+    if isinstance(payload, str) and ".m3u8" in payload:
+        return _normalize_m3u8_url(payload, fallback_hash=fallback_hash)
+
+    return ""
+
+
+def build_direct_media_url(org_id, content_id, encrypted_hash, source_url="", api_payload=None):
+    """
+    Build final Classplus streaming URL.
+    Priority:
+    1) Signed m3u8 URL already present in API payload
+    2) Signed source URL (if it already contains hash_id/token query params)
+    3) Deterministic fallback URL built from org/content/hash values
+    """
+    source_hash = _extract_hash_id_from_url(source_url)
+    hash_value = _first_non_empty(source_hash, encrypted_hash)
+
+    signed_from_payload = _find_signed_m3u8_url(api_payload, fallback_hash=hash_value) if api_payload else ""
+    if signed_from_payload:
+        return signed_from_payload
+
+    normalized_source = _normalize_m3u8_url(source_url, fallback_hash=hash_value)
+    if normalized_source:
+        return normalized_source
+
+    if not (org_id and content_id and hash_value):
         return ""
 
     path_part = str(content_id)
-
     if source_url:
         match = re.search(r"/cc/([^/]+)/master\.m3u8", source_url)
         if match and match.group(1).startswith(f"{content_id}-"):
             path_part = match.group(1)
-
-    return f"https://media-cdn.classplusapp.com/{org_id}/cc/{path_part}/master.m3u8?hash_id={encrypted_hash}"
+            
+    return f"https://media-cdn.classplusapp.com/{org_id}/cc/{path_part}/master.m3u8?hash_id={hash_value}"
 
 @app.on_message(filters.command(["cp"]))
 async def classplus_txt(app, message):
@@ -417,6 +493,8 @@ async def extract_batch(app, message, org_name, batch_id):
             'device-id': '39F093FF35F201D9'
         }
 
+        aiohttp_cookies = {k: v for k, v in s.cookies.get_dict().items() if v}
+        
         def encode_partial_url(url):
             """Return decoded/original URL for direct download while maintaining all video format support."""
             if not url:
@@ -425,13 +503,31 @@ async def extract_batch(app, message, org_name, batch_id):
             # Return original URL for direct download (decoded)
             return url
 
+        def build_request_headers(extra_headers=None):
+            """
+            Create request headers that mimic a logged-in mobile client session.
+            Preserve auth token and scraper/session headers when available.
+            """
+            request_headers = dict(headers)
+            for header_key in ("origin", "referer", "accept-language"):
+                if header_key in s.headers:
+                    request_headers[header_key] = s.headers[header_key]
+
+            if extra_headers:
+                request_headers.update(extra_headers)
+            return request_headers
+
+        def build_session(extra_headers=None):
+            request_headers = build_request_headers(extra_headers=extra_headers)
+            return aiohttp.ClientSession(headers=request_headers, cookies=aiohttp_cookies) 
+        
         async def fetch_live_videos(course_id):
             """Fetch live videos from the API with contentHashId."""
             outputs = []
-            async with aiohttp.ClientSession() as session:
+            async with build_session() as session:
                 try:
                     url = f"{apiurl}/v2/course/live/list/videos?type=2&entityId={course_id}&limit=9999&offset=0"
-                    async with session.get(url, headers=headers) as response:
+                    async with session.get(url) as response:
                         j = await response.json()
                         if "data" in j and "list" in j["data"]:
                             # Add live videos header
@@ -443,7 +539,13 @@ async def extract_batch(app, message, org_name, batch_id):
                                 content_hash = video.get("contentHashId", "")
                         
                                 if video_url or content_hash:
-                                    direct_link = build_direct_media_url(org_id, content_id, content_hash, video_url)
+                                    direct_link = build_direct_media_url(
+                                        org_id,
+                                        content_id,
+                                        content_hash,
+                                        video_url,
+                                        api_payload=video
+                                    )
                                     output_link = direct_link or encode_partial_url(video_url)
                                     outputs.append(f"🎬 {name}: {output_link}\n")
                 except Exception as e:
@@ -457,8 +559,8 @@ async def extract_batch(app, message, org_name, batch_id):
             result = []
             url = f'{apiurl}/v2/course/content/get?courseId={course_id}&folderId={folder_id}'
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as resp:
+            async with build_session() as session:
+                async with session.get(url) as resp:
                     course_data = await resp.json()
                     course_data = course_data["data"]["courseContent"]
 
@@ -502,7 +604,13 @@ async def extract_batch(app, message, org_name, batch_id):
                         
                         # Use encrypted contentId endpoint for videos, keep source URL for non-videos
                         if icon == "🎬":
-                            output_link = build_direct_media_url(org_id, sub_id, content_hash, video_url) or encode_partial_url(video_url)
+                            output_link = build_direct_media_url(
+                                org_id,
+                                sub_id,
+                                content_hash,
+                                video_url,
+                                api_payload=item
+                            ) or encode_partial_url(video_url)
                         else:
                             output_link = encode_partial_url(video_url)
 
