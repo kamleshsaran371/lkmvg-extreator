@@ -29,7 +29,44 @@ async def fetch_content(session, url, headers) -> dict:
     async with session.get(url, headers=headers) as response:
         return await response.json()
 
-async def process_subject_content(session, target_id, subject_id, subject_name, headers, subject_files: Dict[str, List[str]], total_links: List[int]):
+def _extract_item_datetime(item):
+    date_candidates = [
+        item.get("date"),
+        item.get("createdAt"),
+        item.get("updatedAt"),
+        item.get("startTime"),
+        item.get("scheduledAt"),
+        item.get("scheduleDate"),
+        item.get("lectureDate")
+    ]
+    for raw_date in date_candidates:
+        if not raw_date:
+            continue
+        try:
+            normalized = str(raw_date).replace("Z", "+00:00")
+            return datetime.fromisoformat(normalized)
+        except Exception:
+            continue
+    return None
+
+def _is_today_item(item):
+    item_dt = _extract_item_datetime(item)
+    if not item_dt:
+        return False
+    if item_dt.tzinfo:
+        item_dt = item_dt.astimezone(india_timezone)
+    return item_dt.date() == datetime.now(india_timezone).date()
+
+async def process_subject_content(
+    session,
+    target_id,
+    subject_id,
+    subject_name,
+    headers,
+    subject_files: Dict[str, List[str]],
+    total_links: List[int],
+    extract_mode: str
+):
     tasks = []
     for page in range(1, 12):
         url = f"https://api.penpencil.co/v2/batches/{target_id}/subject/{subject_id}/contents?page={page}&contentType=exercises-notes-videos"
@@ -43,24 +80,28 @@ async def process_subject_content(session, target_id, subject_id, subject_name, 
             
         for item in content_response.get("data", []):
             try:
+                if extract_mode == "today" and not _is_today_item(item):
+                    continue
+               
                 video_details = item.get("videoDetails", {})
                 content_id = video_details.get("findKey") if video_details else None
                 title = item.get("topic") or item.get("name")
                 topic = clean_text(title or "")
                 url = item.get("url", "")
-                content_type = "video"
+                content_type = "lecture"
                 if item.get("lectureType"):
                     content_type = item.get("lectureType").lower()
+                resolved_subject = clean_text(item.get("subject", "General") or subject_name or "General")
                 
                 if url:
                     if '.mpd' in url:
                         final_url, parent_id, child_id = extract_mpd_info(url, content_id, target_id)
                         line = format_content_line(topic, final_url, content_type, parent_id, child_id)
-                        subject_files[subject_name].append(line)
+                        subject_files[resolved_subject].append(line)
                         total_links[0] += 1
                     else:
                         line = format_content_line(topic, url, content_type)
-                        subject_files[subject_name].append(line)
+                        subject_files[resolved_subject].append(line)
                         total_links[0] += 1
 
                 for hw in item.get("homeworkIds", []):
@@ -75,11 +116,11 @@ async def process_subject_content(session, target_id, subject_id, subject_name, 
                                 if '.mpd' in full_url:
                                     final_url, parent_id, child_id = extract_mpd_info(full_url, hw_id, target_id)
                                     line = format_content_line(name, final_url, "notes", parent_id, child_id)
-                                    subject_files[subject_name].append(line)
+                                    subject_files[resolved_subject].append(line)
                                     total_links[0] += 1
                                 else:
                                     line = format_content_line(name, full_url, "notes")
-                                    subject_files[subject_name].append(line)
+                                    subject_files[resolved_subject].append(line)
                                     total_links[0] += 1
                         except Exception as e:
                             continue
@@ -113,13 +154,15 @@ def clean_text(text):
     return text
 
 def format_content_line(name, url, content_type="", parent_id=None, child_id=None):
-    """Format content line with modern design and metadata"""
+    """Format clean output lines."""
     name = clean_text(name)
-    prefix = f"[{content_type}] " if content_type else ""
-    
+    final_url = url
     if parent_id and child_id:
-        return f"{prefix}{name}:{url}&parentId={parent_id}&childId={child_id}"
-    return f"{prefix}{name}:{url}"
+        final_url = f"{url}&parentId={parent_id}&childId={child_id}"
+
+    if content_type in ("notes", "pdf", "document"):
+        return f"📄 {name}: {final_url}"
+    return f"🎬 {name}: {final_url}"
 
 @app.on_message(filters.command(["pw"]))
 async def pw_login(app, message):
@@ -194,7 +237,14 @@ async def pw_login(app, message):
             await message.reply_text("❌ **Invalid input! Please provide a valid mobile number or token.**")
             return
 
-
+        extract_mode_msg = await app.ask(
+            message.chat.id,
+            "📥 **Select Extract Mode:**\n\n1. All Extract\n2. Today Extract\n\nSend `1` or `2`."
+        )
+        extract_mode_input = (extract_mode_msg.text or "").strip().lower()
+        extract_mode = "today" if extract_mode_input in ("2", "today", "today extract") else "all"
+        
+        
         headers = {
             "client-id": "5eb393ee95fab7468a79d189",
             "client-type": "WEB",
@@ -282,7 +332,7 @@ async def pw_login(app, message):
                 all_subjects_progress[sn] = False
                 await update_progress()
                 
-                task = process_subject_content(session, target_id, si, sn, headers, subject_files, total_links)
+                task = process_subject_content(session, target_id, si, sn, headers, subject_files, total_links, extract_mode)
                 tasks.append(task)
             
             await asyncio.gather(*tasks)
@@ -293,16 +343,24 @@ async def pw_login(app, message):
 
         # Write subject-wise files
         output_files = []
+        full_lines = []
+        if not subject_files:
+            await message.reply_text("❌ **No content found for selected extract mode.**")
+            return
         for subject_name, lines in subject_files.items():
+            full_lines.append(f"\n# {subject_name}\n")
+            full_lines.extend(lines)
             safe_subject = clean_text(subject_name or "General")
-            filename = f"{clean_batch_name}_{safe_subject}.txt"
+            filename = f"{safe_subject}.txt"
             with open(filename, 'w', encoding='utf-8') as f:
                 for line in lines:
                     f.write(line + "\n")
 
-                f.write("\n━━━━━━━━━━━━━━━━━━━━━\n")
-                f.write("🌟 Join Us: @thekmx\n")
-                f.write("━━━━━━━━━━━━━━━━━━━━━")
+        full_filename = f"{clean_batch_name}_Full.txt"
+        with open(full_filename, 'w', encoding='utf-8') as f:
+            for line in full_lines:
+                f.write(line + "\n")
+        output_files.insert(0, full_filename)
             output_files.append(filename)
 
         end_time = time.time()
@@ -316,6 +374,7 @@ async def pw_login(app, message):
                  f"============================\n\n"
                  f"✳️**Bᴀᴛᴄʜ ID** : **{target_id}**\n"
                  f"🎯 **Bᴀᴛᴄʜ Nᴀᴍᴇ** : `{batch_name}`\n"
+                 f"📂 **Mode**: {'Today Extract' if extract_mode == 'today' else 'All Extract'}\n"
                  f"⚡ **Extraction Time**: {extraction_time:.2f}s\n\n"
                  f"🌐 **Jᴏɪɴ Us** : {join}\n"
                  f"❄️ **Dᴀᴛᴇ** : {time_new}")
