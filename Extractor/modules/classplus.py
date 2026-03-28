@@ -417,7 +417,7 @@ async def extract_batch(app, message, org_name, batch_id):
                         if response.status != 200:
                             return None
                         data = await response.json()
-                        return data.get("url")
+                        return data["url"]
             except Exception:
                 return None
         
@@ -465,14 +465,15 @@ async def extract_batch(app, message, org_name, batch_id):
                 result.append(f"\n{indent}📁 {folder_name}\n{indent}{'=' * (len(folder_name) + 4)}\n")
 
             for item in course_data:
-                content_type = str(item.get("contentType"))
+                content_type = str(item.get("contentType") or item.get("content_type") or "")
                 sub_id = item.get("id")
                 sub_name = item.get("name", "Untitled")
                 video_url = ""
 
                 if content_type in ("2", "3"):  # Video or PDF
                     if content_type == "2":
-                        video_url = await fetch_signed_url(sub_id)
+                        content_id = item.get("id")
+                        video_url = await fetch_signed_url(content_id)
                     else:
                         video_url = item.get("url", "")
                     if video_url:
