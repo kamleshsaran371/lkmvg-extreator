@@ -104,7 +104,7 @@ async def careerdl(app, message, headers, raw_text2, token, raw_text3, prog, nam
     os.remove(f"{file_name}")
 
 
-@app.on_message(filters.command(["maakichut"]))
+@app.on_message(filters.command(["cw", "maakichut"]))
 async def career_will(app, message):
     try:
         input1 = await app.ask(message.chat.id, text="<blockquote>**Send ID & Password in this manner otherwise bot will not respond.\n\nSend like this:-  ID*Password\n\n OR Send Your Token**</blockquote>")
