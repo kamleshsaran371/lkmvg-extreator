@@ -355,13 +355,13 @@ async def pw_login(app, message):
             with open(filename, 'w', encoding='utf-8') as f:
                 for line in lines:
                     f.write(line + "\n")
-
+            output_files.append(filename)
+        
         full_filename = f"{clean_batch_name}_Full.txt"
         with open(full_filename, 'w', encoding='utf-8') as f:
             for line in full_lines:
                 f.write(line + "\n")
         output_files.insert(0, full_filename)
-            output_files.append(filename)
 
         end_time = time.time()
         extraction_time = end_time - start_time
