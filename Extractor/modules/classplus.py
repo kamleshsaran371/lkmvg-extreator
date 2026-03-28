@@ -6,7 +6,6 @@ import time
 import asyncio
 import io
 import aiohttp
-from urllib.parse import urlparse, parse_qs
 from pyrogram import Client, filters
 import os
 from Extractor import app
@@ -46,51 +45,64 @@ async def validate_signed_url_with_curl(url):
 
 
 def get_signed_url(input_url, token):
-    """Return signed URL from Classplus API using only API response."""
-    print("INPUT URL:", input_url)
-    if not input_url:
-        return None
-
-    # CASE 1: URL already has signed playback path and hash_id
-    if "master.m3u8" in input_url and "hash_id" in input_url:
-        return input_url
-
-    endpoint = "https://api.classplusapp.com/cams/uploader/video/jw-signed-url"
-    headers = {
-        "accept": "application/json, text/plain, */*",
-        "x-access-token": token,
-        "user-agent": "Mobile-Android",
-        "region": "IN"
-    }
-
-    params = None
     try:
-        # CASE 2: contentId present in URL query
-        if "contentId=" in input_url:
-            parsed_url = urlparse(input_url)
-            query_map = parse_qs(parsed_url.query, keep_blank_values=False)
-            content_id = query_map.get("contentId", [None])[0]
-            if not content_id:
-                return None
-            params = {"contentId": content_id, "offlineDownload": "false"}
-        # CASE 3: classplus URL without direct contentId
-        elif "classplusapp.com" in input_url:
-            params = {"url": input_url}
-        else:
+        print("INPUT URL:", input_url)
+        if not input_url or not token:
             return None
 
-        response = requests.get(endpoint, headers=headers, params=params, timeout=20)
+    # CASE 1: already signed
+        if "master.m3u8" in input_url and "hash_id" in input_url:
+            return input_url
+
+    # FULL REQUIRED HEADERS (VERY IMPORTANT)
+        headers = {
+            "host": "api.classplusapp.com",
+            "x-access-token": token,
+            "accept-language": "EN",
+            "api-version": "18",
+            "app-version": "1.4.73.2",
+            "build-number": "35",
+            "connection": "Keep-Alive",
+            "content-type": "application/json",
+            "device-details": "Xiaomi_Redmi 7_SDK-32",
+            "device-id": "c28d3cb16bbdac01",
+            "region": "IN",
+            "user-agent": "Mobile-Android",
+            "accept-encoding": "gzip"
+        }
+
+    # CASE 2: contentId मौजूद है
+        if "contentId=" in input_url:
+            content_id = input_url.split("contentId=")[-1].split("&")[0].strip()
+            if not content_id:
+                return None
+            params = {
+                "contentId": content_id,
+                "offlineDownload": "false"
+            }
+        else:
+            # CASE 3: normal URL
+            params = {
+                "url": input_url
+            }
+
+        response = requests.get(
+            "https://api.classplusapp.com/cams/uploader/video/jw-signed-url",
+            params=params,
+            headers=headers,
+            timeout=20
+        )
         print("STATUS:", response.status_code)
         print("RESPONSE:", response.text)
 
-        if response.status_code != 200:
-            return None
-        response_data = response.json()
-        if "url" not in response_data:
-            return None
-        return response_data["url"]
+        if response.status_code == 200:
+            data = response.json()
+            final_url = data.get("url")
+            if final_url:
+                return final_url
+        return None
     except Exception as e:
-        print(f"SIGNED URL FETCH ERROR: {e}")
+        print("ERROR:", e)
         return None
 
 
@@ -98,13 +110,13 @@ async def get_signed_video_url(token, content_id=None, source_url=""):
     """
     Async wrapper for signed URL fetch, safe for batch processing.
     """
-    candidate_url = source_url
+    candidate_url = (source_url or "").strip()
     if not candidate_url and content_id:
-        candidate_url = f"https://api.classplusapp.com/?contentId={content_id}"
+        candidate_url = f"contentId={content_id}"
         
     signed_url = await asyncio.to_thread(get_signed_url, candidate_url, token)
-    if not signed_url and source_url and source_url != candidate_url:
-        signed_url = await asyncio.to_thread(get_signed_url, source_url, token)
+    if not signed_url and source_url and content_id and "contentId=" not in source_url:
+        signed_url = await asyncio.to_thread(get_signed_url, f"contentId={content_id}", token)
     return signed_url or ""
 
 @app.on_message(filters.command(["cp"]))
