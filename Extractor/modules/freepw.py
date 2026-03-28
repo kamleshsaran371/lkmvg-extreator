@@ -25,6 +25,11 @@ time_new = current_time.strftime("%d-%m-%Y %I:%M %p")
 THREADPOOL = ThreadPoolExecutor(max_workers=5000)
 
 
+@app.on_message(filters.command(["freepw"]))
+async def freepw_command_handler(bot: Client, message: Message):
+    await process_pwwp(bot, message, message.from_user.id)
+
+
 
 
 
