@@ -458,22 +458,21 @@ async def extract_batch(app, message, org_name, batch_id):
                 async with session.get(url, headers=headers) as resp:
                     course_data = await resp.json()
                     course_data = course_data["data"]["courseContent"]
+                # Add folder header if not root level
+                if level > 0 and folder_path:
+                    folder_name = folder_path.rstrip(" - ")
+                    indent = "  " * (level - 1)
+                    result.append(f"\n{indent}📁 {folder_name}\n{indent}{'=' * (len(folder_name) + 4)}\n")
 
-            # Add folder header if not root level
-            if level > 0 and folder_path:
-                folder_name = folder_path.rstrip(" - ")
-                indent = "  " * (level - 1)
-                result.append(f"\n{indent}📁 {folder_name}\n{indent}{'=' * (len(folder_name) + 4)}\n")
+                for item in course_data:
+                    content_type = str(item.get("contentType"))
+                    sub_id = item.get("id")
+                    sub_name = item.get("name", "Untitled")
+                    video_url = item.get("url", "")
 
-            for item in course_data:
-                content_type = str(item.get("contentType"))
-                sub_id = item.get("id")
-                sub_name = item.get("name", "Untitled")
-                video_url = item.get("url", "")
-                
-
-                # Add indentation and appropriate icon
-                    indent = "  " * level
+                    if content_type in ("2", "3"):  # Video or PDF
+                        # Add indentation and appropriate icon
+                        indent = "  " * level
 
                     if content_type == "2":
                         icon = "🎬"
