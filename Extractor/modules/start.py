@@ -99,7 +99,7 @@ button1 = [
                 ],
                 [
                     InlineKeyboardButton("👑 CʟᴀssPʟᴜs", callback_data="classplus_"),
-                    InlineKeyboardButton("👑 Pʜʏsɪᴄs Wᴀʟʟᴀʜ", callback_data="pw_")
+                    InlineKeyboardButton("👑 Uᴛᴋᴀʀsʜ", callback_data="utkarsh_")
                 ],
                 [
                     InlineKeyboardButton("👑 Appx Login", callback_data="manual_appx"),
