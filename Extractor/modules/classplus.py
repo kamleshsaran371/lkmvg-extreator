@@ -17,7 +17,6 @@ from datetime import datetime
 import pytz
 from Extractor.core.utils import forward_to_log
 import base64
-from urllib.parse import urlparse, parse_qs
 
 india_timezone = pytz.timezone('Asia/Kolkata')
 current_time = datetime.now(india_timezone)
@@ -26,6 +25,17 @@ time_new = current_time.strftime("%d-%m-%Y %I:%M %p")
 
 apiurl = "https://api.classplusapp.com"
 s = cloudscraper.create_scraper() 
+
+
+def build_encrypted_content_url(content_id):
+    """Build new Classplus signed URL endpoint using encrypted contentId."""
+    if not content_id:
+        return ""
+    # Keep raw Base64 chars (+, /, =) untouched to match Classplus expected format.
+    return (
+        "https://api.classplusapp.com/cams/uploader/video/jw-signed-url"
+        f"?contentId={str(content_id)}"
+    )
 
 @app.on_message(filters.command(["cp"]))
 async def classplus_txt(app, message):
@@ -387,33 +397,7 @@ async def extract_batch(app, message, org_name, batch_id):
             'api-version': '29',
             'device-id': '39F093FF35F201D9'
         }
-        signed_url_headers = {
-            "x-access-token": session_data["token"],
-            "user-agent": "Mobile-Android",
-            "app-version": "1.4.73.2",
-            "api-version": "18",
-            "device-id": "39F093FF35F201D9",
-            "region": "IN"
-        }
 
-        async def get_signed_video_url(session, content_id):
-            """Fetch signed video URL from Classplus API without manual hash generation."""
-            if not content_id:
-                return ""
-
-            signed_url_api = f"{apiurl}/cams/uploader/video/jw-signed-url"
-            signed_params = {
-                "contentId": content_id,
-                "offlineDownload": "false"
-            }
-            try:
-                async with session.get(signed_url_api, headers=signed_url_headers, params=signed_params) as signed_resp:
-                    signed_json = await signed_resp.json()
-                    return signed_json.get("url", "")
-            except Exception as e:
-                print(f"Error fetching signed URL for content {content_id}: {e}")
-                return ""
-        
         def encode_partial_url(url):
             """Return decoded/original URL for direct download while maintaining all video format support."""
             if not url:
@@ -435,14 +419,13 @@ async def extract_batch(app, message, org_name, batch_id):
                             outputs.append(f"\n🎥 LIVE VIDEOS\n{'=' * 12}\n")
                             for video in j["data"]["list"]:
                                 name = video.get("name", "Unknown Video")
-                                content_id = video.get("id")
-                                video_url = await get_signed_video_url(session, content_id)
+                                video_url = video.get("url", "")
+                                content_hash = video.get("contentHashId", "")
                         
-                                if video_url:
-                                    # Use original URL for direct download
-                                    decoded_url = encode_partial_url(video_url)
-                                    # Clean URL without hash appended
-                                    outputs.append(f"🎬 {name}: {decoded_url}\n")
+                                if video_url or content_hash:
+                                    encrypted_link = build_encrypted_content_url(content_hash)
+                                    output_link = encrypted_link or encode_partial_url(video_url)
+                                    outputs.append(f"🎬 {name}: {output_link}\n")
                 except Exception as e:
                     print(f"Error fetching live videos: {e}")
 
@@ -458,44 +441,54 @@ async def extract_batch(app, message, org_name, batch_id):
                 async with session.get(url, headers=headers) as resp:
                     course_data = await resp.json()
                     course_data = course_data["data"]["courseContent"]
-                # Add folder header if not root level
-                if level > 0 and folder_path:
-                    folder_name = folder_path.rstrip(" - ")
-                    indent = "  " * (level - 1)
-                    result.append(f"\n{indent}📁 {folder_name}\n{indent}{'=' * (len(folder_name) + 4)}\n")
 
-                for item in course_data:
-                    content_type = str(item.get("contentType"))
-                    sub_id = item.get("id")
-                    sub_name = item.get("name", "Untitled")
-                    video_url = item.get("url", "")
+            # Add folder header if not root level
+            if level > 0 and folder_path:
+                folder_name = folder_path.rstrip(" - ")
+                indent = "  " * (level - 1)
+                result.append(f"\n{indent}📁 {folder_name}\n{indent}{'=' * (len(folder_name) + 4)}\n")
 
-                    if content_type in ("2", "3"):  # Video or PDF
+            for item in course_data:
+                content_type = str(item.get("contentType"))
+                sub_id = item.get("id")
+                sub_name = item.get("name", "Untitled")
+                video_url = item.get("url", "")
+                content_hash = item.get("contentHashId", "")
+
+                if content_type in ("2", "3"):  # Video or PDF
+                    if video_url:
                         # Add indentation and appropriate icon
                         indent = "  " * level
-
-                    if content_type == "2":
-                        icon = "🎬"
-                        signed_url = await get_signed_video_url(session, sub_id)
-                        if not signed_url:
-                            continue
-                        decoded_url = encode_partial_url(signed_url)
-                    else:
-                        if not video_url:
-                            continue
+                        
+                        # Check if it's a video file (including DRM and special cases)
+                        video_extensions = ('.m3u8', '.mp4', '.mpd', '.avi', '.mov', '.wmv', '.flv', '.webm')
+                        is_video = (video_url.lower().endswith(video_extensions) or 
+                                   "playlist.m3u8" in video_url or 
+                                   "master.m3u8" in video_url or
+                                   "classplusapp.com/drm" in video_url or
+                                   "testbook.com" in video_url)
+                        
                         if video_url.lower().endswith('.pdf'):
                             icon = "📄"
+                            # Remove .pdf from name if present
                             if sub_name.endswith('.pdf'):
                                 sub_name = sub_name[:-4]
+                        elif is_video:
+                            icon = "🎬"
                         elif video_url.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
                             icon = "🖼"
                         else:
                             icon = "📄"
-                        decoded_url = encode_partial_url(video_url)
-                    
-                    # Format vertically - each item on its own line
-                    full_info = f"{indent}{icon} {sub_name}: {decoded_url}\n"
-                    result.append(full_info)
+                        
+                        # Use encrypted contentId endpoint for videos, keep source URL for non-videos
+                        if icon == "🎬":
+                            output_link = build_encrypted_content_url(content_hash) or encode_partial_url(video_url)
+                        else:
+                            output_link = encode_partial_url(video_url)
+
+                        # Format vertically - each item on its own line
+                        full_info = f"{indent}{icon} {sub_name}: {output_link}\n"
+                        result.append(full_info)
 
                 elif content_type == "1":  # Folder
                     new_folder_path = f"{folder_path}{sub_name} - "
