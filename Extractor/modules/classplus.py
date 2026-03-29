@@ -387,15 +387,7 @@ async def extract_batch(app, message, org_name, batch_id):
             'api-version': '29',
             'device-id': '39F093FF35F201D9'
         }
-        signed_headers = {
-            "x-access-token": session_data["token"],
-            "user-agent": "Mobile-Android",
-            "app-version": "1.4.73.2",
-            "api-version": "18",
-            "device-id": "39F093FF35F201D9",
-            "region": "IN"
-        }
-        
+
         def encode_partial_url(url):
             """Return decoded/original URL for direct download while maintaining all video format support."""
             if not url:
@@ -404,23 +396,6 @@ async def extract_batch(app, message, org_name, batch_id):
             # Return original URL for direct download (decoded)
             return url
 
-        async def fetch_signed_url(content_id):
-            if not content_id:
-                return None
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        f"{apiurl}/cams/uploader/video/jw-signed-url",
-                        headers=signed_headers,
-                        params={"contentId": content_id, "offlineDownload": "false"}
-                    ) as response:
-                        if response.status != 200:
-                            return None
-                        data = await response.json()
-                        return data["url"]
-            except Exception:
-                return None
-        
         async def fetch_live_videos(course_id):
             """Fetch live videos from the API with contentHashId."""
             outputs = []
@@ -434,17 +409,17 @@ async def extract_batch(app, message, org_name, batch_id):
                             outputs.append(f"\n🎥 LIVE VIDEOS\n{'=' * 12}\n")
                             for video in j["data"]["list"]:
                                 name = video.get("name", "Unknown Video")
-                                content_id = video.get("id")
-                                video_url = await fetch_signed_url(content_id)
+                                video_url = video.get("url", "")
+                                content_hash = video.get("contentHashId", "")
                         
                                 if video_url:
                                     # Use original URL for direct download
                                     decoded_url = encode_partial_url(video_url)
                                     # Clean URL without hash appended
                                     outputs.append(f"🎬 {name}: {decoded_url}\n")
-                except Exception:
-                    pass
-           
+                except Exception as e:
+                    print(f"Error fetching live videos: {e}")
+
             return outputs
 
 
@@ -465,17 +440,13 @@ async def extract_batch(app, message, org_name, batch_id):
                 result.append(f"\n{indent}📁 {folder_name}\n{indent}{'=' * (len(folder_name) + 4)}\n")
 
             for item in course_data:
-                content_type = str(item.get("contentType") or item.get("content_type") or "")
+                content_type = str(item.get("contentType"))
                 sub_id = item.get("id")
                 sub_name = item.get("name", "Untitled")
-                video_url = ""
+                video_url = item.get("url", "")
+                content_hash = item.get("contentHashId", "")
 
                 if content_type in ("2", "3"):  # Video or PDF
-                    if content_type == "2":
-                        content_id = item.get("id")
-                        video_url = await fetch_signed_url(content_id)
-                    else:
-                        video_url = item.get("url", "")
                     if video_url:
                         # Add indentation and appropriate icon
                         indent = "  " * level
@@ -539,7 +510,7 @@ async def extract_batch(app, message, org_name, batch_id):
         pdf_count = sum(1 for line in extracted_data if "📄" in line and not line.startswith("📁"))
         image_count = sum(1 for line in extracted_data if "🖼" in line)
         folder_count = sum(1 for line in extracted_data if "📁" in line and "====" in line)
-        live_video_count = sum(1 for line in extracted_data if "🎬" in line and line.startswith("🎬"))
+        live_video_count = sum(1 for line in extracted_data if "🎬" in line and "contentHashId:" in line)
         total_links = len(extracted_data)
         other_count = total_links - (video_count + pdf_count + image_count + folder_count + live_video_count)
         
